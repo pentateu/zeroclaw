@@ -33,3 +33,4 @@ venv/
 *.pem
 credentials.json
 .worktrees/
+.aider*
