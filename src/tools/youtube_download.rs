@@ -4,9 +4,23 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use tokio::process::Command;
 use super::traits::{Tool, ToolResult};
+use crate::security::SecurityPolicy;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
-pub struct YoutubeDownloadTool;
+pub struct YoutubeDownloadTool {
+    security: Arc<SecurityPolicy>,
+    workspace_dir: PathBuf,
+}
+
+impl YoutubeDownloadTool {
+    pub fn new(security: Arc<SecurityPolicy>, workspace_dir: PathBuf) -> Self {
+        Self {
+            security,
+            workspace_dir,
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for YoutubeDownloadTool {
@@ -78,19 +92,29 @@ impl Tool for YoutubeDownloadTool {
                     "type": "boolean",
                     "default": false,
                     "description": "Only list available formats, do NOT download"
-                }
+                },
+                "output_dir": { "type": "string", "description": "Optional output dir" }
             },
             "required": ["url"]
         })
     }
 
     async fn execute(&self, args: Value) -> Result<ToolResult> {
+        
         // Early yt-dlp check
         if Command::new("yt-dlp").arg("--version").output().await.is_err() {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some("yt-dlp not found in PATH. Install with: brew install yt-dlp ffmpeg (macOS)".to_string()),
+            });
+        }
+
+        if !self.security.record_action() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Action blocked: rate limit exceeded".into()),
             });
         }
 
@@ -106,9 +130,11 @@ impl Tool for YoutubeDownloadTool {
         let custom_name = args["output_filename"].as_str().map(|s| s.trim().to_string());
         let debug = args["debug"].as_bool().unwrap_or(false);
 
-        let output_dir: PathBuf = std::env::current_dir()
-            .context("Failed to get current directory")?
-            .join("downloads");
+        let output_dir = if let Some(d) = args["output_dir"].as_str() {
+            PathBuf::from(d)
+        } else {
+            self.workspace_dir.join("downloads/youtube")
+        };
         std::fs::create_dir_all(&output_dir).ok();
 
         let template = if let Some(name) = &custom_name {
@@ -144,6 +170,14 @@ impl Tool for YoutubeDownloadTool {
                 success: output.status.success(),
                 output: result,
                 error: if output.status.success() { None } else { Some("yt-dlp -F failed".to_string()) },
+            });
+        }
+
+        if !self.security.can_act() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Action blocked: autonomy is read-only".into()),
             });
         }
 
@@ -313,6 +347,7 @@ impl Tool for YoutubeDownloadTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::AutonomyLevel;
     use serde_json::{json, Value};
     use std::path::PathBuf;
     use tokio::fs;
@@ -322,50 +357,42 @@ mod tests {
     const TEST_VIDEO_SUBS: &str = "https://www.youtube.com/watch?v=3tmd-ClpJxA";
     const TEST_PLAYLIST: &str = "https://www.youtube.com/playlist?list=PLcduW1K6eOtn8mIAArqAjonxvYviQ6ZAa";
 
-    // Guard that deletes the directory on drop (success or failure/panic)
-    struct TestDirGuard(PathBuf);
-
-    impl Drop for TestDirGuard {
-        fn drop(&mut self) {
-            // Ignore errors during cleanup (e.g. permission issues) — don't crash the test
-            let _ = fs::remove_dir_all(&self.0);
-        }
+    fn test_security(level: AutonomyLevel, max_actions_per_hour: u32) -> Arc<SecurityPolicy> {
+        Arc::new(SecurityPolicy {
+            autonomy: level,
+            max_actions_per_hour,
+            workspace_dir: std::env::temp_dir(),
+            ..SecurityPolicy::default()
+        })
     }
-
-    async fn test_output_dir() -> (PathBuf, TestDirGuard) {
-        let dir = std::env::temp_dir().join("zeroclaw_yt_test");
-        fs::create_dir_all(&dir).await.ok();
-
-        let dir_clone = dir.clone();
-
-        (dir, TestDirGuard(dir_clone))
-    }
-
+ 
     #[tokio::test]
     async fn test_audio_only_default() {
-        let (dir, _guard) = test_output_dir().await;
-        let tool = YoutubeDownloadTool;
+        let tool = YoutubeDownloadTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
         let res = tool.execute(json!({
             "url": TEST_VIDEO,
-            "mode": "audio",
-            "output_dir": dir.to_string_lossy().to_string()
+            "mode": "audio"
         })).await.unwrap();
         assert!(res.success, "Error: {:?}", res.error);
         let output: Value = serde_json::from_str(&res.output).unwrap();
         let path = output["file_paths"][0].as_str().unwrap();
         assert!(path.ends_with(".mp3"));
-        // dir auto-cleaned by _guard drop
+        let _ = fs::remove_dir_all("/tmp/downloads/youtube/");
     }
 
     #[tokio::test]
     async fn test_video_720p() {
-        let (dir, _guard) = test_output_dir().await;
-        let tool = YoutubeDownloadTool;
+        let tool = YoutubeDownloadTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
         let res = tool.execute(json!({
             "url": TEST_VIDEO,
             "mode": "video",
-            "quality": "720",
-            "output_dir": dir.to_string_lossy().to_string()
+            "quality": "720"
         })).await.unwrap();
         assert!(res.success, "Error: {:?}", res.error);
         let output: Value = serde_json::from_str(&res.output).unwrap();
@@ -375,12 +402,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_subtitles_default() {
-        let (dir, _guard) = test_output_dir().await;
-        let tool = YoutubeDownloadTool;
+        let tool = YoutubeDownloadTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
         let res = tool.execute(json!({
             "url": TEST_VIDEO_SUBS,
-            "subtitles": true,
-            "output_dir": dir.to_string_lossy().to_string()
+            "subtitles": true
         })).await.unwrap();
         assert!(res.success, "Default subtitles failed: {:?}", res.error);
         let output: Value = serde_json::from_str(&res.output).unwrap();
@@ -389,16 +417,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_all_features_combined() {
-        let (dir, _guard) = test_output_dir().await;
-        let tool = YoutubeDownloadTool;
+        let tool = YoutubeDownloadTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
         let res = tool.execute(json!({
             "url": TEST_VIDEO_SUBS,
             "mode": "video",
             "quality": "best",
             "subtitles": true,
             "thumbnails": true,
-            "output_filename": "combined_test",
-            "output_dir": dir.to_string_lossy().to_string()
+            "output_filename": "combined_test"
         })).await.unwrap();
         assert!(res.success, "Combined failed: {:?}", res.error);
         let output: Value = serde_json::from_str(&res.output).unwrap();
@@ -408,12 +437,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_thumbnails() {
-        let (dir, _guard) = test_output_dir().await;
-        let tool = YoutubeDownloadTool;
+        let tool = YoutubeDownloadTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
         let res = tool.execute(json!({
             "url": TEST_VIDEO,
-            "thumbnails": true,
-            "output_dir": dir.to_string_lossy().to_string()
+            "thumbnails": true
         })).await.unwrap();
         assert!(res.success, "Error: {:?}", res.error);
         let output: Value = serde_json::from_str(&res.output).unwrap();
@@ -422,12 +452,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_custom_filename() {
-        let (dir, _guard) = test_output_dir().await;
-        let tool = YoutubeDownloadTool;
+        let tool = YoutubeDownloadTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
         let res = tool.execute(json!({
             "url": TEST_VIDEO,
-            "output_filename": "my_custom_test_file",
-            "output_dir": dir.to_string_lossy().to_string()
+            "output_filename": "my_custom_test_file"
         })).await.unwrap();
         assert!(res.success, "Error: {:?}", res.error);
         let output: Value = serde_json::from_str(&res.output).unwrap();
@@ -436,14 +467,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_playlist_single_item() {
-        let (dir, _guard) = test_output_dir().await;
-        let tool = YoutubeDownloadTool;
-        let res = tool.execute(json!({
+    async fn execute_blocks_readonly_mode() {
+        let tool = YoutubeDownloadTool::new(
+            test_security(AutonomyLevel::ReadOnly, 100),
+            PathBuf::from("/tmp"),
+        );
+
+        let result = tool.execute(json!({
             "url": TEST_PLAYLIST,
             "playlist": true,
             "playlist_items": "1-2",
-            "output_dir": dir.to_string_lossy().to_string()
+        })).await.unwrap();
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("read-only"));
+    }
+
+    #[tokio::test]
+    async fn test_playlist_single_item() {
+        let tool = YoutubeDownloadTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
+        let res = tool.execute(json!({
+            "url": TEST_PLAYLIST,
+            "playlist": true,
+            "playlist_items": "1-2"
         })).await.unwrap();
         assert!(res.success, "Error: {:?}", res.error);
         let output: Value = serde_json::from_str(&res.output).unwrap();
@@ -452,7 +500,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_formats_only() {
-        let tool = YoutubeDownloadTool;
+        let tool = YoutubeDownloadTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
         let res = tool.execute(json!({
             "url": TEST_VIDEO,
             "list_formats": true
@@ -464,7 +515,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_error_invalid_url() {
-        let tool = YoutubeDownloadTool;
+        let tool = YoutubeDownloadTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
         let res = tool.execute(json!({ "url": "https://bad.url" })).await.unwrap();
         assert!(!res.success);
         assert!(res.error.is_some());

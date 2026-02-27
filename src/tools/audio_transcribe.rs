@@ -5,9 +5,23 @@ use std::path::PathBuf;
 use tokio::fs;
 use tokio::process::Command;
 use super::traits::{Tool, ToolResult};
+use crate::security::SecurityPolicy;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
-pub struct AudioTranscribeTool;
+pub struct AudioTranscribeTool {
+    security: Arc<SecurityPolicy>,
+    workspace_dir: PathBuf,
+}
+
+impl AudioTranscribeTool {
+    pub fn new(security: Arc<SecurityPolicy>, workspace_dir: PathBuf) -> Self {
+        Self {
+            security,
+            workspace_dir,
+        }
+    }
+}
 
 #[async_trait]
 impl Tool for AudioTranscribeTool {
@@ -34,6 +48,23 @@ impl Tool for AudioTranscribeTool {
     }
 
     async fn execute(&self, args: Value) -> Result<ToolResult> {
+
+        if !self.security.can_act() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Action blocked: autonomy is read-only".into()),
+            });
+        }
+
+        if !self.security.record_action() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Action blocked: rate limit exceeded".into()),
+            });
+        }
+
         let input = args["input"].as_str().context("Missing 'input'")?.to_string();
 
         // Early check: prefer local faster-whisper
@@ -61,7 +92,7 @@ impl Tool for AudioTranscribeTool {
         let output_dir = if let Some(d) = args["output_dir"].as_str() {
             PathBuf::from(d)
         } else {
-            std::env::current_dir()?.join("downloads/transcripts")
+            self.workspace_dir.join("downloads/transcripts")
         };
         fs::create_dir_all(&output_dir).await.ok();
 
@@ -196,38 +227,33 @@ impl AudioTranscribeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+     use crate::security::AutonomyLevel;
     use serde_json::json;
     use std::path::PathBuf;
     use tokio::fs;
 
-    struct TestDirGuard(PathBuf);
-
-    impl Drop for TestDirGuard {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
+    fn test_security(level: AutonomyLevel, max_actions_per_hour: u32) -> Arc<SecurityPolicy> {
+        Arc::new(SecurityPolicy {
+            autonomy: level,
+            max_actions_per_hour,
+            workspace_dir: std::env::temp_dir(),
+            ..SecurityPolicy::default()
+        })
     }
-
-    async fn test_output_dir() -> (PathBuf, TestDirGuard) {
-        let dir = std::env::temp_dir().join("zeroclaw_transcribe_test");
-        fs::create_dir_all(&dir).await.ok();
-
-        // Clone BEFORE moving into guard
-        let dir_for_guard = dir.clone();
-
-        (dir, TestDirGuard(dir_for_guard))
-    }
+ 
 
     const TEST_VIDEO: &str = "https://www.youtube.com/watch?v=jNQXAC9IVRw";  
     const TEST_VIDEO_SUBS: &str = "https://www.youtube.com/watch?v=3tmd-ClpJxA";  
  
     #[tokio::test]
     async fn test_audio_transcribe_youtube_default() {
-        let (dir, _guard) = test_output_dir().await;
-        let tool = AudioTranscribeTool;
+        let tool = AudioTranscribeTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
+         
         let res = tool.execute(json!({
-            "input": TEST_VIDEO,
-            "output_dir": dir.to_string_lossy().to_string()
+            "input": TEST_VIDEO
         })).await.unwrap();
 
         if !res.success {
@@ -242,13 +268,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_audio_transcribe_with_timestamps() {
-        let (dir, _guard) = test_output_dir().await;
-        let tool = AudioTranscribeTool;
+        
+        let tool = AudioTranscribeTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
         let res = tool.execute(json!({
             "input": TEST_VIDEO_SUBS,
             "word_timestamps": true,
-            "format": "json",
-            "output_dir": dir.to_string_lossy().to_string()
+            "format": "json"
         })).await.unwrap();
 
         if !res.success {
@@ -268,7 +296,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_audio_transcribe_error_no_input() {
-        let tool = AudioTranscribeTool;
+        let tool = AudioTranscribeTool::new(
+            test_security(AutonomyLevel::Full, 100),
+            PathBuf::from("/tmp"),
+        );
         let result = tool.execute(json!({})).await;
 
         assert!(result.is_err(), "Expected Err on missing input");
