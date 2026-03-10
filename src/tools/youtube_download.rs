@@ -366,7 +366,11 @@ mod tests {
         })
     }
  
+    // Integration test: downloads audio from YouTube using `yt-dlp` + `ffmpeg`.
+    // Marked `#[ignore]` so it does not run during normal `cargo test`.
+    // Run with: `cargo test -- --ignored --test-threads=1`
     #[tokio::test]
+    #[ignore]
     async fn test_audio_only_default() {
         let tool = YoutubeDownloadTool::new(
             test_security(AutonomyLevel::Full, 100),
@@ -383,7 +387,9 @@ mod tests {
         let _ = fs::remove_dir_all("/tmp/downloads/youtube/");
     }
 
+    // Integration test: downloads video; requires network and ffmpeg.
     #[tokio::test]
+    #[ignore]
     async fn test_video_720p() {
         let tool = YoutubeDownloadTool::new(
             test_security(AutonomyLevel::Full, 100),
@@ -400,7 +406,9 @@ mod tests {
         assert!(path.ends_with(".mp4"));
     }
 
+    // Integration test: downloads subtitles from YouTube.
     #[tokio::test]
+    #[ignore]
     async fn test_subtitles_default() {
         let tool = YoutubeDownloadTool::new(
             test_security(AutonomyLevel::Full, 100),
@@ -415,7 +423,9 @@ mod tests {
         // Optional: could check for .srt in dir, but success is enough
     }
 
+    // Integration test: exercises multiple features and downloads assets.
     #[tokio::test]
+    #[ignore]
     async fn test_all_features_combined() {
         let tool = YoutubeDownloadTool::new(
             test_security(AutonomyLevel::Full, 100),
@@ -435,7 +445,9 @@ mod tests {
         assert!(!output["thumbnail_paths"].as_array().unwrap().is_empty());
     }
 
+    // Integration test: downloads thumbnails.
     #[tokio::test]
+    #[ignore]
     async fn test_thumbnails() {
         let tool = YoutubeDownloadTool::new(
             test_security(AutonomyLevel::Full, 100),
@@ -450,7 +462,9 @@ mod tests {
         assert!(!output["thumbnail_paths"].as_array().unwrap().is_empty());
     }
 
+    // Integration test: ensures custom output filename is applied.
     #[tokio::test]
+    #[ignore]
     async fn test_custom_filename() {
         let tool = YoutubeDownloadTool::new(
             test_security(AutonomyLevel::Full, 100),
@@ -466,6 +480,7 @@ mod tests {
         assert!(path.contains("my_custom_test_file"));
     }
 
+    // Unit test: ensures readonly autonomy blocks execution. Safe to run by default.
     #[tokio::test]
     async fn execute_blocks_readonly_mode() {
         let tool = YoutubeDownloadTool::new(
@@ -482,7 +497,9 @@ mod tests {
         assert!(result.error.unwrap().contains("read-only"));
     }
 
+    // Integration test: downloads playlist items (network-heavy).
     #[tokio::test]
+    #[ignore]
     async fn test_playlist_single_item() {
         let tool = YoutubeDownloadTool::new(
             test_security(AutonomyLevel::Full, 100),
@@ -498,7 +515,9 @@ mod tests {
         assert!(output["file_paths"].as_array().unwrap().len() >= 1);
     }
 
+    // Integration test: lists formats via `yt-dlp -F` (network/yt-dlp dependency).
     #[tokio::test]
+    #[ignore]
     async fn test_list_formats_only() {
         let tool = YoutubeDownloadTool::new(
             test_security(AutonomyLevel::Full, 100),
@@ -513,7 +532,9 @@ mod tests {
         assert!(res.output.contains("video") || res.output.contains("audio") || res.output.contains("format"));
     }
 
+    // Integration test: exercises error handling for invalid URLs.
     #[tokio::test]
+    #[ignore]
     async fn test_error_invalid_url() {
         let tool = YoutubeDownloadTool::new(
             test_security(AutonomyLevel::Full, 100),
@@ -524,4 +545,6 @@ mod tests {
         assert!(res.error.is_some());
         // No files created → no cleanup needed
     }
+
+    
 }

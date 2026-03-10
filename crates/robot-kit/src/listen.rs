@@ -71,15 +71,26 @@ impl ListenTool {
         let whisper_path = &self.config.audio.whisper_path;
         let model = &self.config.audio.whisper_model;
 
-        // whisper.cpp model path (typically in ~/.zeroclaw/models/)
-        let model_path = directories::UserDirs::new()
-            .map(|d| {
-                d.home_dir()
-                    .join(format!(".zeroclaw/models/ggml-{}.bin", model))
-            })
-            .unwrap_or_else(|| {
-                PathBuf::from(format!("/usr/local/share/whisper/ggml-{}.bin", model))
+        // Determine canonical models directory: prefer ZEROCLAW_WHISPER_MODELS_DIR, else ~/.zeroclaw/models
+        let models_dir = std::env::var("ZEROCLAW_WHISPER_MODELS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                directories::UserDirs::new()
+                    .map(|d| d.home_dir().join(".zeroclaw/models"))
+                    .unwrap_or_else(|| PathBuf::from("/usr/local/share/whisper"))
             });
+
+        // ensure directory exists (best-effort)
+        let _ = std::fs::create_dir_all(&models_dir);
+
+        // Resolve model path: absolute path allowed; otherwise look under models_dir
+        let model_path = if Path::new(model).is_absolute() {
+            PathBuf::from(model)
+        } else if model.contains("ggml-") || model.ends_with(".bin") {
+            models_dir.join(model)
+        } else {
+            models_dir.join(format!("ggml-{}.bin", model))
+        };
 
         // Run whisper.cpp
         let output = tokio::process::Command::new(whisper_path)

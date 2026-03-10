@@ -67,6 +67,8 @@ pub mod web_fetch;
 pub mod web_search_tool;
 pub mod audio_transcribe;
 pub mod youtube_download;
+#[cfg(test)]
+mod integration_tests;
 
 pub use apply_patch::ApplyPatchTool;
 pub use browser::{BrowserTool, ComputerUseConfig};
