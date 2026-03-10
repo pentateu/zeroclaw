@@ -153,7 +153,7 @@ impl Tool for AudioTranscribeTool {
     fn name(&self) -> &str { "audio_transcribe" }
 
     fn description(&self) -> &str {
-        "Transcribes audio from local file or YouTube URL using local faster-whisper (preferred, offline, fast) or OpenAI Whisper API fallback. Supports timestamps, SRT/VTT, initial prompt. Ideal for voice notes, meetings, podcasts."
+        "Transcribes audio from local file or YouTube URL using local whisper-cli (offline, fast). Supports timestamps, SRT/VTT. Ideal for voice notes, meetings, podcasts."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -161,11 +161,10 @@ impl Tool for AudioTranscribeTool {
             "type": "object",
             "properties": {
                 "input": { "type": "string", "description": "Local audio path or YouTube URL (required)" },
-                "model": { "type": "string", "default": "auto", "description": "faster-whisper model or OpenAI model" },
+                "model": { "type": "string", "default": "auto", "description": "whisper-cli model" },
                 "language": { "type": "string", "default": "auto" },
                 "format": { "type": "string", "enum": ["text", "json", "srt", "vtt"], "default": "text" },
                 "word_timestamps": { "type": "boolean", "default": false },
-                "initial_prompt": { "type": "string" },
                 "output_dir": { "type": "string", "description": "Optional output dir" }
             },
             "required": ["input"]
@@ -192,14 +191,14 @@ impl Tool for AudioTranscribeTool {
 
         let input = args["input"].as_str().context("Missing 'input'")?.to_string();
 
-        // Early check: prefer local whisper.cpp CLI (installed by bootstrap-tools.sh)
+        // Check if whisper-cli is available
         let use_local = Command::new("whisper-cli").arg("--help").output().await.is_ok();
 
-        if !use_local && std::env::var("OPENAI_API_KEY").is_err() {
+        if !use_local {
             return Ok(ToolResult {
                 success: false,
                 output: "".to_string(),
-                error: Some("Neither faster-whisper nor OPENAI_API_KEY is available. Install faster-whisper or set OPENAI_API_KEY env var.".to_string()),
+                error: Some("whisper-cli is not available. Install whisper-cli.".to_string()),
             });
         }
 
@@ -234,11 +233,7 @@ impl Tool for AudioTranscribeTool {
         };
 
         // 2. Transcribe
-        let result = if use_local {
-            self.transcribe_local(&audio_path, &model, &language, &format, word_timestamps, initial_prompt.as_deref(), &output_dir).await?
-        } else {
-            self.transcribe_openai(&audio_path, &model, &language, &format, word_timestamps, initial_prompt.as_deref()).await?
-        };
+        let result = self.transcribe_local(&audio_path, &model, &language, &format, word_timestamps, None, &output_dir).await?;
 
         // 3. Cleanup temporary audio if downloaded from URL
         if input.starts_with("http") {
@@ -330,37 +325,7 @@ impl AudioTranscribeTool {
         })
     }
 
-    async fn transcribe_openai(&self, audio_path: &PathBuf, model: &str, language: &str, format: &str, word_timestamps: bool, initial_prompt: Option<&str>) -> Result<ToolResult> {
-        let api_key = std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY not set for OpenAI fallback")?;
-        let client = reqwest::Client::new();
 
-        let mut form = reqwest::multipart::Form::new()
-            .file("file", audio_path).await?
-            .text("model", model.to_string());  // clone to owned String
-
-        if language != "auto" {
-            form = form.text("language", language.to_string());
-        }
-        if let Some(p) = initial_prompt {
-            form = form.text("prompt", p.to_string());
-        }
-        if format == "verbose_json" || word_timestamps {
-            form = form.text("response_format", "verbose_json".to_string());
-        }
-
-        let res = client.post("https://api.openai.com/v1/audio/transcriptions")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .multipart(form)
-            .send().await?;
-
-        let json: Value = res.json().await?;
-
-        Ok(ToolResult {
-            success: true,
-            output: json.to_string(),
-            error: None,
-        })
-    }
 }
 
 // =============================================================================
@@ -455,7 +420,7 @@ mod tests {
         let res = tool.execute(json!({ "input": dl_path.to_str().unwrap() })).await.unwrap();
         if !res.success {
             let err = res.error.as_ref().map(|s| s.to_lowercase()).unwrap_or_default();
-            assert!(err.contains("whisper") || err.contains("openai_api_key") || err.contains("unavailable"));
+            assert!(err.contains("whisper") || err.contains("unavailable"));
             return;
         }
         let output: Value = serde_json::from_str(&res.output).unwrap();
@@ -525,7 +490,7 @@ mod tests {
 
         if !res.success {
             let err = res.error.unwrap_or_default().to_lowercase();
-            if err.contains("video unavailable") || err.contains("unavailable") || err.contains("whisper") || err.contains("openai_api_key") {
+            if err.contains("video unavailable") || err.contains("unavailable") || err.contains("whisper") {
                 println!("Skipping test due to transient/unavailable backend or YouTube: {}", err);
                 return;
             }
@@ -533,7 +498,8 @@ mod tests {
         }
 
         let output: Value = serde_json::from_str(&res.output).unwrap();
-        assert!(output["segments"].is_array(), "Expected segments in JSON output");
+        let transcript_json: Value = serde_json::from_str(output["transcript"].as_str().unwrap()).unwrap();
+        assert!(transcript_json["transcription"].is_array(), "Expected transcription in JSON output");
         assert!(!output["transcript"].as_str().unwrap_or("").is_empty());
     }
 
